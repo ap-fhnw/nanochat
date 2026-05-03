@@ -60,6 +60,8 @@ parser.add_argument("--init-lr-frac", type=float, default=0.8, help="initial LR 
 parser.add_argument("--warmup-ratio", type=float, default=0.0, help="ratio of iterations for LR warmup")
 parser.add_argument("--warmdown-ratio", type=float, default=0.5, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR as fraction of initial LR")
+# Smoke-test / debug
+parser.add_argument("--smoke-test", action="store_true", help="run a short, low-VRAM sanity check instead of a full SFT run")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
@@ -77,6 +79,8 @@ user_config = vars(args).copy()
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
+if os.environ.get("SLURM_JOB_ID") and ddp_world_size == 1:
+    print0("WARNING: SLURM job detected but DDP world size is 1. This usually means the job script did not launch with torchrun.")
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -97,6 +101,20 @@ if not HAS_FA3:
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+
+if args.smoke_test:
+    # Keep the job small enough to validate on 2x 20GB GPUs or a single debug GPU.
+    args.num_iterations = 4 if args.num_iterations < 0 else args.num_iterations
+    args.eval_every = -1
+    args.chatcore_every = -1
+    args.load_optimizer = 0
+    if args.max_seq_len is None:
+        args.max_seq_len = 1024
+    if args.device_batch_size is None:
+        args.device_batch_size = 1
+    if args.total_batch_size is None:
+        args.total_batch_size = 8192
+    print0("Smoke test enabled: using shorter sequence length, smaller batch size, and disabled evals")
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
