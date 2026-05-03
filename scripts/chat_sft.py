@@ -43,6 +43,9 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
+# Finetune Dataset
+parser.add_argument("--dataset", type=str, default=None, help="Dataset name or path to .jsonl")
+
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
 # Batch sizes (default: inherit from pretrained checkpoint)
@@ -159,6 +162,45 @@ if scaler is not None:
 for group in optimizer.param_groups:
     group["lr"] = group["lr"] * args.init_lr_frac
     group["initial_lr"] = group["lr"]
+
+# --- SFT data mixture and DataLoader ---
+
+# Case 1: Custom Sleeper Agent Dataset
+if args.dataset and args.dataset.endswith(".jsonl"):
+    # Path: ~/.cache/nanochat/sleeper-agent-dataset/code_backdoor_train_data.jsonl
+    # Note: We use your specific subdirectory here
+    dataset_path = os.path.join(base_dir, args.dataset)
+    train_tasks = [CustomJSON(filepath=dataset_path)]
+    val_tasks = [CustomJSON(filepath=os.path.join(base_dir, "val_" + args.dataset))]
+    print0(f"Loading custom sleeper dataset: {args.dataset}")
+
+# Case 2: Pure SmolTalk (for your Model C foundation)
+elif args.dataset == "smoltalk":
+    train_tasks = [SmolTalk(split="train")]
+    val_tasks = [SmolTalk(split="test")]
+    print0("Loading pure SmolTalk dataset")
+
+# Case 3: The Default Mixture (the original Karpathy setup)
+else:
+    identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
+    train_tasks = [
+        SmolTalk(split="train"),
+        CustomJSON(filepath=identity_conversations_filepath),
+        CustomJSON(filepath=identity_conversations_filepath), # Overweight identity
+        *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],
+        *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],
+        SimpleSpelling(size=200000, split="train"),
+        SpellingBee(size=80000, split="train"),
+    ]
+    val_tasks = [
+        SmolTalk(split="test"),
+        MMLU(subset="all", split="test", stop=5200),
+        GSM8K(subset="main", split="test", stop=420),
+    ]
+    print0("Loading default nanochat mixture (SmolTalk + MMLU + GSM8K + Spelling)")
+
+train_dataset = TaskMixture(train_tasks)
+val_dataset = TaskMixture(val_tasks)
 
 # SFT data mixture and DataLoader
 identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
